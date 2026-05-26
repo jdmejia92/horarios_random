@@ -27,6 +27,9 @@ MONTHS_ES = [
     'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
 ]
 
+# Actividades con alternación de sexo día a día y semana a semana
+RESPONSABLE_NAMES = frozenset({'responsable 1', 'responsable 2'})
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Utilidades de fecha
@@ -61,6 +64,37 @@ def get_year_weeks(year=None):
     return weeks
 
 
+def get_month_weeks(year: int, month: int):
+    """
+    Devuelve todas las semanas (lunes–sábado) que se solapan con el mes/año dado.
+    Incluye semanas cuyo lunes cae en el mes anterior si el mes empieza a mitad de semana.
+    Cada elemento: (monday_date, week_dates, week_offset_global)
+    """
+    import calendar
+    first_day   = datetime(year, month, 1)
+    first_monday = first_day - timedelta(days=first_day.weekday())
+
+    last_day_num  = calendar.monthrange(year, month)[1]
+    last_day      = datetime(year, month, last_day_num)
+
+    # Índice global de semana (para alternación continua)
+    year_start    = get_year_weeks(year)
+    year_mondays  = {md: i for i, (md, _) in enumerate(year_start)}
+
+    result = []
+    current = first_monday
+    while current <= last_day:
+        week_dates = [
+            (DAYS[i], (current + timedelta(days=i)).strftime('%d/%m/%Y'))
+            for i in range(6)
+        ]
+        # week_offset = índice de semana desde inicio del año (para alternación)
+        week_offset = year_mondays.get(current, 0)
+        result.append((current, week_dates, week_offset))
+        current += timedelta(weeks=1)
+    return result
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Normalización de sexo
 # ─────────────────────────────────────────────────────────────────────────────
@@ -80,32 +114,71 @@ def student_can_do(student_sex: str, activity_sex: str) -> bool:
     return activity_sex == 'Indiferente' or student_sex == activity_sex
 
 
+def opposite_sex(sex: str) -> str:
+    """Invierte Hombre↔Mujer. Indiferente queda igual."""
+    return {'Hombre': 'Mujer', 'Mujer': 'Hombre'}.get(sex, sex)
+
+
+def effective_sex(act_name: str, original_sex: str, week_offset: int, day_idx: int) -> str:
+    """
+    Para actividades llamadas 'Responsable 1' o 'Responsable 2' (sin distinción
+    de mayúsculas/minúsculas) alterna el sexo requerido usando:
+
+        paridad = (week_offset + day_idx) % 2
+
+    paridad 0 → sexo original   |   paridad 1 → sexo opuesto
+
+    De esta forma:
+      - Dentro de la semana cambia cada día (Lunes original, Martes opuesto, …)
+      - Entre semanas también alterna (semanas par empiezan en original,
+        semanas impar empiezan en opuesto)
+    """
+    if act_name.strip().lower() not in RESPONSABLE_NAMES:
+        return original_sex
+    if original_sex == 'Indiferente':
+        return original_sex
+    parity = (week_offset + day_idx) % 2
+    return original_sex if parity == 0 else opposite_sex(original_sex)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Algoritmo de generación
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generate_week_schedule(activities: list, students: list) -> dict:
+def generate_week_schedule(activities: list, students: list,
+                           week_offset: int = 0) -> dict:
     """
     schedule[dia][actividad] = nombre_alumno (o '—')
+
     - Actividades de sexo específico → prioridad (menos candidatos)
     - Cada alumno: máximo una actividad por día
     - Sin repetición actividad-alumno dentro de la semana (en lo posible)
+    - 'Responsable 1' / 'Responsable 2': sexo alterna por día y semana
+      usando week_offset (índice de semana desde inicio del año)
     """
     schedule = {day: {} for day in DAYS}
     history  = {s['Nombre Alumnos']: set() for s in students}
 
-    for day in DAYS:
+    for day_idx, day in enumerate(DAYS):
         available = {s['Nombre Alumnos']: s['Sexo'] for s in students}
-        specific  = [a for a in activities if a['Sexo'] != 'Indiferente']
-        general   = [a for a in activities if a['Sexo'] == 'Indiferente']
+
+        # Calcular sexo efectivo para CADA actividad en ESTE día
+        def act_eff_sex(a):
+            return effective_sex(a['Nombre actividad'], a['Sexo'],
+                                 week_offset, day_idx)
+
+        # Prioridad: actividades de sexo específico primero (incluye
+        # las responsable cuyo sexo efectivo ese día no sea Indiferente)
+        specific = [a for a in activities if act_eff_sex(a) != 'Indiferente']
+        general  = [a for a in activities if act_eff_sex(a) == 'Indiferente']
         random.shuffle(specific)
         random.shuffle(general)
 
         for activity in specific + general:
-            act_name = activity['Nombre actividad']
-            act_sex  = activity['Sexo']
-            eligible = [sn for sn, ss in available.items()
-                        if student_can_do(ss, act_sex)]
+            act_name   = activity['Nombre actividad']
+            act_sex    = act_eff_sex(activity)          # sexo real para hoy
+            eligible   = [sn for sn, ss in available.items()
+                          if student_can_do(ss, act_sex)]
             if not eligible:
                 schedule[day][act_name] = '—'
                 continue
@@ -128,15 +201,34 @@ def _prepare_dfs(activities_df, students_df):
 
 
 def generate_schedule(activities_df, students_df):
+    """Horario de la semana actual (week_offset=0)."""
     acts, stus = _prepare_dfs(activities_df, students_df)
-    return generate_week_schedule(acts, stus)
+    return generate_week_schedule(acts, stus, week_offset=0)
+
+
+def generate_monthly_schedule(activities_df, students_df, year: int, month: int):
+    """
+    Genera el horario de un mes completo.
+    Retorna lista de (monday_date, week_dates, schedule).
+    La alternación de Responsable continúa entre semanas.
+    """
+    acts, stus = _prepare_dfs(activities_df, students_df)
+    result = []
+    for monday_date, week_dates, week_offset in get_month_weeks(year, month):
+        sched = generate_week_schedule(acts, stus, week_offset=week_offset)
+        result.append((monday_date, week_dates, sched))
+    return result
 
 
 def generate_annual_schedule(activities_df, students_df, year=None):
+    """
+    Genera el horario de todo el año.
+    La alternación de Responsable es continua a lo largo de las 52 semanas.
+    """
     acts, stus = _prepare_dfs(activities_df, students_df)
     result = []
-    for monday_date, week_dates in get_year_weeks(year):
-        sched = generate_week_schedule(acts, stus)
+    for week_offset, (monday_date, week_dates) in enumerate(get_year_weeks(year)):
+        sched = generate_week_schedule(acts, stus, week_offset=week_offset)
         result.append((monday_date, week_dates, sched))
     return result
 
@@ -263,6 +355,39 @@ def save_weekly_excel(schedule, activities_df, week_dates):
                       show_week_hdr=False, row_h=32, fsz=10)
     _set_col_widths(ws, act_w=30, day_w=22)
     ws.freeze_panes = 'B4'
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+def save_monthly_excel(monthly_data, activities_df, year: int, month: int):
+    """Retorna un BytesIO con el Excel de un mes (una sola hoja)."""
+    act_names  = list(activities_df['Nombre actividad'])
+    month_name = MONTHS_ES[month - 1]
+    n_cols     = len(DAYS) + 1
+    last_col   = get_column_letter(n_cols)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = month_name
+
+    ws.merge_cells(f'A1:{last_col}1')
+    c = ws['A1']
+    c.value     = f"HORARIO {month_name.upper()} {year}"
+    c.font      = _font(bold=True, color=C_WHITE, size=14)
+    c.fill      = _fill(C_BLUE_DARK)
+    c.alignment = _align('center')
+    c.border    = MED
+    ws.row_dimensions[1].height = 32
+
+    cur_row = 2
+    for _, week_dates, schedule in monthly_data:
+        cur_row = _write_week_block(ws, cur_row, week_dates, schedule,
+                                    act_names, show_week_hdr=True,
+                                    row_h=28, fsz=10)
+    _set_col_widths(ws, act_w=28, day_w=20)
 
     buf = BytesIO()
     wb.save(buf)
@@ -479,13 +604,30 @@ if uploaded_file is not None:
 
         schedule_type = st.radio(
             "Selecciona el periodo a generar:",
-            ["📅  Esta semana", "📆  Todo el año"],
+            ["📅  Esta semana", "🗓️  Este mes", "📆  Todo el año"],
             horizontal=True,
             label_visibility="collapsed"
         )
 
-        year = None
-        if "año" in schedule_type:
+        year  = datetime.now().year
+        month = datetime.now().month
+
+        if "mes" in schedule_type:
+            col_m, col_y = st.columns([2, 1])
+            with col_m:
+                month_name_sel = st.selectbox(
+                    "Mes:", MONTHS_ES,
+                    index=datetime.now().month - 1,
+                    label_visibility="visible"
+                )
+                month = MONTHS_ES.index(month_name_sel) + 1
+            with col_y:
+                year = st.number_input(
+                    "Año:", min_value=2020, max_value=2060,
+                    value=datetime.now().year, step=1
+                )
+
+        elif "año" in schedule_type:
             year = st.number_input(
                 "Año a generar:",
                 min_value=2020, max_value=2060,
@@ -508,18 +650,26 @@ if uploaded_file is not None:
                     schedule   = generate_schedule(acts, stus)
                     excel_buf  = save_weekly_excel(schedule, acts, week_dates)
                     filename   = f"Horario_Semanal_{ts}.xlsx"
-                    n_weeks    = 1
+                    resumen    = "1 semana"
+
+            elif "mes" in schedule_type:
+                month_label = MONTHS_ES[int(month) - 1]
+                with st.spinner(f"Generando horario de {month_label} {int(year)}…"):
+                    monthly   = generate_monthly_schedule(acts, stus,
+                                                          int(year), int(month))
+                    excel_buf = save_monthly_excel(monthly, acts,
+                                                   int(year), int(month))
+                    filename  = f"Horario_{month_label}_{int(year)}_{ts}.xlsx"
+                    resumen   = f"{len(monthly)} semanas · {month_label} {int(year)}"
+
             else:
                 with st.spinner(f"Generando horario anual {int(year)} (52 semanas)…"):
                     annual    = generate_annual_schedule(acts, stus, int(year))
                     excel_buf = save_annual_excel(annual, acts, int(year))
                     filename  = f"Horario_Anual_{int(year)}_{ts}.xlsx"
-                    n_weeks   = len(annual)
+                    resumen   = f"{len(annual)} semanas · 12 hojas"
 
-            st.success(
-                f"✅ ¡Horario generado!  "
-                f"({'1 semana' if n_weeks == 1 else f'{n_weeks} semanas · 12 hojas'})"
-            )
+            st.success(f"✅ ¡Horario generado!  ({resumen})")
 
             st.download_button(
                 label="📥  Descargar Horario Excel",
@@ -551,8 +701,16 @@ with st.expander("ℹ️  Reglas de asignación y formato del Excel"):
 - ⚪ Actividades **Indiferente** → cualquier alumno
 - Cada alumno hace **máximo una actividad por día**
 - Se evita repetir la misma actividad al mismo alumno **dentro de la semana**
-- La distribución es **aleatoria** en cada generación (usa "Generar" nuevamente para obtener otra distribución)
+- La distribución es **aleatoria** en cada generación
 - El símbolo **—** indica que no hay alumnos disponibles con el género requerido
+
+**Regla especial — Responsable 1 / Responsable 2:**
+- Nombra las actividades exactamente `Responsable 1` y `Responsable 2` en el Excel
+- El sexo definido en la columna Sexo es el **sexo inicial** (ej. Responsable 1 = Hombre)
+- El sexo **alterna cada día** dentro de la semana y **también entre semanas**:
+  - Semana par, Lunes → sexo original · Martes → sexo opuesto · Miércoles → original…
+  - Semana impar, Lunes → sexo opuesto · Martes → original · Miércoles → opuesto…
+- Responsable 1 y Responsable 2 siempre tienen géneros complementarios en cada día
 """)
 
 # ── Footer ───────────────────────────────────────────────────────────────────
