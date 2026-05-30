@@ -713,25 +713,42 @@ if uploaded_file is not None:
                 name_sun  = f"Domingos_{year}_{ts}.xlsx"
                 resumen   = f"{year} · 12 hojas"
 
-            st.success(f"✅ ¡Listo! ({resumen})")
+            # Guardar en session_state para que los botones persistan
+            # aunque Streamlit re-ejecute el script al hacer clic en descarga
+            st.session_state['horario_buf_main']  = buf_main
+            st.session_state['horario_buf_sun']   = buf_sun
+            st.session_state['horario_has_sun']   = has_sun
+            st.session_state['horario_name_main'] = name_main
+            st.session_state['horario_name_sun']  = name_sun
+            st.session_state['horario_resumen']   = resumen
 
+        # Botones de descarga — fuera del if anterior para que persistan
+        # tras cualquier rerun (incluyendo el clic en el propio download_button)
+        if 'horario_buf_main' in st.session_state:
+            st.success(f"✅ ¡Listo! ({st.session_state['horario_resumen']})")
+
+            has_sun = st.session_state['horario_has_sun']
             dl1, dl2 = (st.columns(2) if has_sun else (st.container(), None))
 
             with dl1:
                 st.download_button(
                     label="📥 Horario principal (Lun–Dom)",
-                    data=buf_main, file_name=name_main,
+                    data=st.session_state['horario_buf_main'],
+                    file_name=st.session_state['horario_name_main'],
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
+                    key="dl_main",
                 )
 
             if has_sun and dl2:
                 with dl2:
                     st.download_button(
                         label="☀️ Horario domingos",
-                        data=buf_sun, file_name=name_sun,
+                        data=st.session_state['horario_buf_sun'],
+                        file_name=st.session_state['horario_name_sun'],
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         use_container_width=True,
+                        key="dl_sun",
                     )
 
         st.markdown('</div>', unsafe_allow_html=True)
