@@ -577,6 +577,7 @@ st.markdown("""
         background: #FEF3E2; border-left: 4px solid #C05621;
         border-radius: 0 8px 8px 0; padding: 0.7rem 1rem;
         font-size: 0.9rem; margin-top: 0.5rem;
+        color: black !important;
     }
 </style>
 """, unsafe_allow_html=True)
